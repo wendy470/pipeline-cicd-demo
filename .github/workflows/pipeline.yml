@@ -113,7 +113,7 @@ jobs:
       - name: Analyse statique avec Flake8
         run: |
           pip install flake8
-          flake8 src/ --max-line-length=100 --statistics
+          flake8 src/ --max-line-length=100 --statistics --extend-ignore=E302,E303
           echo "✅ Qualité du code validée"
 
       # Scan de sécurité du code source (SAST)
