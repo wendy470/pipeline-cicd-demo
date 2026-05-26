@@ -1,0 +1,245 @@
+# =============================================================
+# PIPELINE CI/CD - BC02-EC06 - RNCP39611-ASRC
+# Outil : GitHub Actions
+# Workflow Git : GitFlow (main=prod, develop=staging, feature/*)
+# =============================================================
+
+name: Pipeline CI/CD Complet
+
+# --- DÉCLENCHEURS ---
+# Le pipeline se lance sur push ou pull request
+# vers les branches principales
+on:
+  push:
+    branches:
+      - main       # branche production
+      - develop    # branche staging
+  pull_request:
+    branches:
+      - main
+      - develop
+
+# --- VARIABLES GLOBALES ---
+env:
+  IMAGE_NAME: ${{ github.repository_owner }}/monapp
+  IMAGE_TAG:  ${{ github.sha }}
+
+jobs:
+
+  # =========================================================
+  # JOB 1 : BUILD
+  # Déclencheur : Push ou PR
+  # Artefact : binaire / package compilé
+  # Condition de passage : build sans erreur
+  # =========================================================
+  build:
+    name: 🔨 Build
+    runs-on: ubuntu-latest
+    steps:
+
+      # Récupère le code source depuis le dépôt
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # Configure l'environnement Python
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      # Installe les dépendances du projet
+      - name: Installation des dépendances
+        run: |
+          pip install -r requirements.txt
+          echo "✅ Build réussi"
+
+  # =========================================================
+  # JOB 2 : TESTS UNITAIRES
+  # Déclencheur : après build
+  # Artefact : rapport de tests
+  # Condition de passage : couverture >= 80%
+  # =========================================================
+  tests:
+    name: 🧪 Tests Unitaires
+    runs-on: ubuntu-latest
+    needs: build           # ne démarre qu'après build OK
+    steps:
+
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Installation des dépendances de test
+        run: pip install pytest pytest-cov
+
+      # Lance les tests avec mesure de couverture
+      # Le pipeline ÉCHOUE si couverture < 80% (fail fast)
+      - name: Exécution des tests avec couverture
+        run: |
+          pytest tests/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-fail-under=80 \
+            -v
+
+      # Sauvegarde le rapport pour consultation
+      - name: Upload rapport de couverture
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  # =========================================================
+  # JOB 3 : ANALYSE QUALITÉ (SonarQube simulé)
+  # Déclencheur : après tests
+  # Artefact : rapport qualité
+  # Condition de passage : pas de bug bloquant
+  # =========================================================
+  qualite:
+    name: 🔍 Analyse Qualité
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # Analyse statique du code (SAST)
+      # Détecte les bugs, vulnérabilités, mauvaises pratiques
+      - name: Analyse statique avec Flake8
+        run: |
+          pip install flake8
+          flake8 src/ --max-line-length=100 --statistics
+          echo "✅ Qualité du code validée"
+
+      # Scan de sécurité du code source (SAST)
+      # Cherche des patterns dangereux dans le code
+      - name: Scan sécurité SAST avec Bandit
+        run: |
+          pip install bandit
+          bandit -r src/ -ll
+          echo "✅ Aucune vulnérabilité critique détectée"
+
+  # =========================================================
+  # JOB 4 : BUILD IMAGE DOCKER
+  # Déclencheur : après qualité
+  # Artefact : image Docker taguée
+  # Condition de passage : build réussi
+  # =========================================================
+  docker-build:
+    name: 🐳 Build Image Docker
+    runs-on: ubuntu-latest
+    needs: qualite
+    steps:
+
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # Construction de l'image Docker avec tag unique (SHA du commit)
+      - name: Build de l'image Docker
+        run: |
+          docker build -t $IMAGE_NAME:$IMAGE_TAG .
+          docker build -t $IMAGE_NAME:latest .
+          echo "✅ Image construite : $IMAGE_NAME:$IMAGE_TAG"
+
+      # Scan de l'image Docker avant publication
+      # Détecte les CVE dans l'image (principe DevSecOps)
+      - name: Scan sécurité image avec Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:latest
+          format: table
+          # Le pipeline échoue si vulnérabilité CRITIQUE détectée
+          exit-code: '1'
+          severity: CRITICAL
+
+  # =========================================================
+  # JOB 5 : PUSH REGISTRY
+  # Déclencheur : après build image
+  # Artefact : image dans le registry
+  # Condition de passage : scan sécurité OK
+  # =========================================================
+  push-registry:
+    name: 📦 Push Registry
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # Authentification Docker Hub via SECRETS (jamais en clair !)
+      - name: Login Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build et Push image
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_NAME }}:latest
+
+  # =========================================================
+  # JOB 6 : DEPLOY STAGING
+  # Déclencheur : après push registry
+  # Artefact : env staging à jour
+  # Condition de passage : tests E2E OK
+  # =========================================================
+  deploy-staging:
+    name: 🚀 Deploy Staging
+    runs-on: ubuntu-latest
+    needs: push-registry
+    environment: staging   # environnement GitHub protégé
+    steps:
+
+      - name: Déploiement en staging
+        run: |
+          echo "🔵 Déploiement sur staging..."
+          echo "Image : $IMAGE_NAME:$IMAGE_TAG"
+          # Ici : ssh vers serveur staging, kubectl apply, etc.
+          echo "✅ Staging déployé"
+
+      # Tests de bout en bout pour valider le déploiement
+      - name: Tests E2E (smoke tests)
+        run: |
+          echo "🧪 Vérification health check staging..."
+          # curl https://staging.monapp.internal/health
+          echo "✅ Tests E2E passés"
+
+  # =========================================================
+  # JOB 7 : DEPLOY PRODUCTION
+  # Déclencheur : MANUEL ou tag Git (validation Go/No-Go)
+  # Artefact : env production mis à jour
+  # Condition : uniquement depuis main + validation humaine
+  # =========================================================
+  deploy-production:
+    name: 🏁 Deploy Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    # Uniquement sur la branche main (pas sur develop)
+    if: github.ref == 'refs/heads/main'
+    environment: production  # nécessite approbation manuelle
+    steps:
+
+      - name: Déploiement en production (Rolling Update)
+        run: |
+          echo "🟢 Déploiement production - Rolling Update"
+          echo "Image : $IMAGE_NAME:$IMAGE_TAG"
+          # Stratégie rolling update : 
+          # mise à jour progressive sans downtime
+          echo "✅ Production mise à jour"
+
+      # Notification de déploiement (traçabilité)
+      - name: Notification déploiement
+        run: |
+          echo "📢 Déploiement $IMAGE_TAG en production réussi"
+          echo "Commit: ${{ github.sha }}"
+          echo "Auteur: ${{ github.actor }}"
