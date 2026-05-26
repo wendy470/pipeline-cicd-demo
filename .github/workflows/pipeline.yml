@@ -18,6 +18,7 @@ on:
     branches:
       - main
       - develop
+  workflow_dispatch: 
 
 # --- VARIABLES GLOBALES ---
 env:
